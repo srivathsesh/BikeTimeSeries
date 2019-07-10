@@ -1,0 +1,761 @@
+---
+title: "Hackathon_Starter"
+author: "Sri Seshadri"
+date: "6/26/2019"
+output: 
+  html_document:
+    self_contained: yes 
+    code_folding: hide
+    fig_caption: yes
+    theme: darkly
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1.0 Congratulations you made it here! Thank you for being here!
+
+## 1.1 Objective : 
+
+  1. We will be attempting to forecast bike rentals in DC metro area for the period 12/1/2012 to 12/31/2012
+  2. We will use the data in Train.csv to analyze the data and build a predictive/forecasting model.
+  3. Forecast the "cnt" variable for the next 31 days and report it in Result.csv, by filling in the second column in Resut.csv.
+  4. Browse Readme.txt to get familiar with the data dictionary.
+  5. If you are using R as your tool for this exercise, you are welcome to use this file as your starter code.
+
+# 2.0 Package requirements
+
+1. tidyverse
+2. forecast
+3. lubridate
+4. xts
+5. car*
+6. magrittr
+7. purrr* 
+8. plotly*
+9. lattice
+10. skimr*
+11. astsa*
+
+The ones marked with asterix are optional.
+
+```{r librarycalls, warning=F, message=F}
+#*****************************************
+#         Libraries used
+#*****************************************
+library(magrittr)
+library(tidyverse)
+library(forecast)
+library(astsa)
+library(plotly)
+library(lattice)
+library(xts)
+library(lubridate)
+library(purrr)
+```
+
+# 3.0 Read data
+
+```{r readdata}
+bike <-  read.csv('Train.csv',stringsAsFactors = F)
+
+# inspect data 
+skimr::skim(bike)
+```
+
+
+## 3.1 Change data types
+
+```{r}
+# changing categorical variables into factors.
+# The symbol %<>%  takes the variable to the left of it, modifies it based on whats on the right of it and saves it back in the same variable. As in ... a = a + 5
+
+bike %<>%
+  mutate(dteday = as.Date(dteday,format = "%m/%d/%Y")) %>% 
+  mutate(season = as.factor(season),
+         weathersit = as.factor(weathersit),
+         weekday = as.factor(weekday),
+         holiday = as.factor(holiday),
+         mnth = as.factor(mnth),
+         workingday = as.factor(workingday),
+         season = as.factor(season),
+         yr = as.factor(yr)
+         )
+
+str(bike)
+bikexts <- xts(bike,order.by = bike$dteday)
+
+
+#**************************************************************
+#             Function to make time series objects
+#**************************************************************
+
+makets <- function(dataframe,start, frequency = 365.25){
+  
+  # we have not used a for loop, but elegantly applied a function to every column in the data frame, using the purrr library
+  
+  library(purrr)
+  
+  1:ncol(dataframe) %>% 
+    map(function(x) ts(dataframe[,x],start = start, frequency = frequency))  
+}
+
+bike %>% 
+  select(-instant) %>% 
+  select_if(is.numeric) %>% colnames() -> tsnames
+
+bike %>% 
+  select(-instant) %>% 
+  select_if(is.numeric) %>% 
+  makets(., start = bike$dteday[1]) -> tslist
+
+names(tslist) <- tsnames
+
+# Explore other series by choosing other variables for example tslist$temp
+tslist$cnt
+
+
+```
+
+
+# 4.0 Exploratory Data Analysis
+
+What would you do in Power BI, how would you explore the data? Something to that effect...
+
+Below is an example
+
+```{r}
+bike %>% 
+  ggplot(aes(x=weekday, y = cnt)) + geom_boxplot() + facet_wrap(~yr)
+
+
+bike %>% 
+  ggplot(aes(x=season, y = cnt)) + geom_boxplot() + facet_wrap(~yr)
+
+bike %>% 
+  group_by(yr,mnth) %>% 
+  summarise(TotalCts = sum(cnt)) %>% 
+  ggplot(aes(x=mnth, y = TotalCts, col = yr)) + geom_point() + theme_bw()
+
+
+bike %>% 
+  group_by(yr,mnth,weekday,holiday) %>% 
+  summarise(TotalCts = sum(cnt)) %>% 
+  ggplot(aes(x=mnth, y = TotalCts, col = weekday)) + geom_point() + geom_jitter(width = 0.25) + theme_bw() + facet_wrap(~yr + holiday,ncol = 2)
+
+
+bike %>% 
+  group_by(yr,mnth,weekday,workingday) %>% 
+  summarise(TotalCts = sum(cnt)) %>% 
+  ggplot(aes(x=mnth, y = TotalCts,col = weekday)) + geom_point() + geom_jitter(width = 0.25) + theme_bw() + facet_wrap(~yr + workingday,ncol = 2)
+
+bike %>% 
+  ggplot(aes(x=temp,y = cnt)) + geom_point() + theme_bw() + geom_smooth()
+
+bike %>% 
+  ggplot(aes(x=hum,y = cnt)) + geom_point() + theme_bw() + geom_smooth()
+
+bike %>% 
+  ggplot(aes(x=windspeed,y = cnt)) + geom_point() + theme_bw() + geom_smooth()
+
+bike %>% 
+  ggplot(aes(x=weathersit,y = cnt)) + geom_violin() + theme_bw() + geom_smooth()
+
+beanplot::beanplot(bike$cnt ~ bike$weathersit, col = c('red','yellow','green'))
+
+bike %>% 
+  ggplot(aes(x=temp,y = hum, col = weathersit)) + geom_point()
+
+```
+
+
+Successful model building comes after good exploration of the data, visualize data to see what are useful columns in predicting cnts...what is correlated with what?
+
+# 5.0 Modeling
+
+## 5.1 Splitting  data into training and validation 
+
+```{r}
+# if you want to split the data into training and validation ... like earmark the last 30 days of the data to make it your validation data for model evaluation... then here is how you can do it
+
+training <- bike[1:670,]
+validation <-  bike[671:700,]
+
+trainingxts <- xts(training%>% 
+  select(-instant) %>% 
+  select_if(is.numeric),order.by = training$dteday)
+
+validationxts <- xts(validation%>% 
+  select(-instant) %>% 
+  select_if(is.numeric),order.by = validation$dteday)
+
+traintslist <-  training %>% 
+  select(-instant) %>% 
+  select_if(is.numeric) %>% 
+  makets(., start = training$dteday[1])
+
+names(traintslist) <- tsnames
+
+validationtslist <-  validation %>% 
+  select(-instant) %>% 
+  select_if(is.numeric) %>% 
+  makets(., start = validation$dteday[1])
+
+names(validationtslist) <- tsnames
+
+```
+
+
+```{r}
+# Sampler for using the time series lists
+autoplot(traintslist$temp) + theme_bw()
+plot(trainingxts$temp)
+
+autoplot(validationtslist$temp)
+plot(validationxts$temp)
+
+autoplot(trainingxts$cnt)
+```
+
+## 5.2 Thoughts on modeling
+
+1. Try model "cnts" directly - naive, ETS, ARIMA and others
+2. Leverage other variables in the data set.
+3. Be mindful of relationship between and among columns in the data.
+4. Try things we did with the housing sales data.
+5. Use the holidays / working days are something as known for
+
+
+# 6.0 Modeling
+
+## 6.1 Feature selection
+
+What features are useful in predicting cnts?
+
+We've seen that the following might be useful based on our EDA
+
+1. Month
+2. Weekday 
+3. Working day (notice that if its a weekday - non working day, the rentals are low.)
+4. year - of course!
+5. weathersit
+6. temp
+7. hum
+8. may be windspeed.
+
+
+```{r}
+corrplot::corrplot(bike %>% 
+                     select_if(is.numeric) %>% 
+                     select(-instant,-casual,-registered) %>% 
+                     cor(.))
+
+```
+
+
+## 6.2 Multiple linear regression model
+
+Notice the auto correlated residuals! Means that there is information still left that the model did not capture.
+
+```{r}
+lmmdl1 <-  lm(cnt ~ temp + hum + windspeed + yr + mnth, data = training)
+summary(lmmdl1)
+
+checkresiduals(ts(lmmdl1$residuals,start = ymd('2011-01-01'), frequency = 1))
+```
+
+ARIMA model on the residuals
+
+```{r}
+ARRes <- auto.arima(ts(lmmdl1$residuals,start = ymd('2011-01-01'), frequency = 1))
+checkresiduals(ARRes)
+```
+
+ARIMA model with xreg argument ... 
+
+```{r}
+# library(nlme)
+# gls(cnt ~ temp + hum + windspeed + yr + mnth, data = training, correlation = corARMA(p=1,q=1)) -> lmmdl2
+
+xreg <- training[,c("temp", "hum", "mnth","workingday","weekday","windspeed")] %>% 
+  mutate_if(is.factor, as.numeric) %>% 
+  data.matrix()
+
+auto.arima(traintslist$cnt,xreg = xreg) -> lmarmdl
+
+checkresiduals(lmarmdl)
+
+xreg <- training[,c("temp", "hum", "mnth","workingday","weekday","windspeed")]
+
+predict(caret::dummyVars(formula = "~.",data = xreg,fullRank = T),xreg) -> xregdummy
+
+
+
+auto.arima(traintslist$cnt,xreg = xregdummy) -> lmarmdl_dummy
+
+checkresiduals(lmarmdl_dummy)
+```
+
+```{r}
+accuracy(lmarmdl)
+accuracy(lmarmdl_dummy)
+```
+
+```{r}
+xreg_lastyr <- training[-1:-365,c("temp", "hum", "mnth","workingday","weekday","windspeed")] %>% 
+  mutate_if(is.factor, as.numeric) %>% 
+  data.matrix()
+
+auto.arima(traintslist$cnt[-1:-365],xreg = xreg_lastyr) -> lmarmdl_lastyr
+
+checkresiduals(lmarmdl_lastyr)
+
+#xreg <- training[,c("temp", "hum", "mnth","workingday","weekday","windspeed")]
+
+predict(caret::dummyVars(formula = "~.",data = xreg_lastyr,fullRank = T),xreg_lastyr) -> xregdummy_lastyr
+
+
+
+auto.arima(traintslist$cnt[-1:-365],xreg = xregdummy_lastyr) -> lmarmdl_dummy_lastyr
+
+checkresiduals(lmarmdl_dummy_lastyr)
+```
+```{r}
+# what would the accuracy be? 
+accuracy(lmarmdl_lastyr)
+accuracy(lmarmdl_dummy_lastyr)
+```
+
+
+```{r}
+library(caret)
+
+Y = training$cnt[-1:-365]
+X = xreg[-1:-365,]
+
+rfmdl <- train(X,Y,
+                 method = 'rf',
+                 trControl = trainControl(method = 'repeatedcv'),
+                 metric = 'RMSE',
+                 tuneLength = 15,
+                 ntrees = 500,
+                 importance = T
+                 )
+plot(rfmdl)
+
+plot(varImp(rfmdl))
+
+rfmdl$results$mtry
+```
+
+
+```{r}
+xreg2 <- training[-1:-365,c("temp", "hum","workingday","weekday","weathersit","windspeed","season")] %>% 
+  mutate_if(is.factor, as.numeric) %>% 
+  data.matrix()
+
+rfmdl2 <- train(xreg2,Y,
+                 method = 'rf',
+                 trControl = trainControl(method = 'repeatedcv'),
+                 metric = 'RMSE',
+                 tuneLength = 15,
+                 ntrees = 500,
+                 importance = T
+                 )
+plot(rfmdl2)
+
+plot(varImp(rfmdl2))
+
+checkresiduals(predict(rfmdl2$finalModel) - Y)
+```
+
+## So we the forecast of regressors, the weathersit is the difficult one ...
+
+```{r}
+xweather = training[,c("temp","hum","windspeed","mnth", "yr")]
+yweather = training$weathersit
+
+rfmdl_W <- train(xweather,yweather,
+                 method = 'rf',
+                 trControl = trainControl(method = 'repeatedcv'),
+                 metric = 'accuracy',
+                 tuneLength = 15,
+                 ntrees = 500,
+                 importance = T
+                 )
+plot(rfmdl_W)
+
+plot(varImp(rfmdl_W))
+
+table(predict(rfmdl_W$finalModel),yweather)
+```
+
+```{r}
+xweather$mnth <-  as.factor(xweather$mnth)
+
+# making this to get the rpart working
+levels(yweather) <- c("C","M","S")
+rpart_W <- train(xweather,yweather,
+                 method = 'rpart2',
+                 trControl = trainControl(method = 'repeatedcv', classProbs = T,savePredictions = T ),
+                 metric = 'ROC'
+                 )
+partykit::as.party.rpart(rpart_W$finalModel) -> rpartmdl_W
+
+plot(rpart_W)
+plot(rpartmdl_W)
+varImp(rpart_W)
+table(predict(rpartmdl_W),yweather)
+
+lattice::barchart(yweather)
+```
+
+```{r}
+library(klaR)
+nBayesFit <- NaiveBayes(weathersit ~ temp + hum + windspeed + mnth, data = training, usekernel = T, fL = 2)
+
+table(predict(nBayesFit)$class , training$weathersit) -> cm
+
+1 - sum(cm[row(cm) != col(cm)])/sum(cm)
+
+```
+
+## Forecast temp, hum, windspeed
+
+```{r}
+autoplot(trainingxts$hum) + geom_smooth()
+
+arma_hum <-  auto.arima(traintslist$hum)
+checkresiduals(arma_hum)
+
+accuracy(forecast(arma_hum, h = 30), tslist$hum)
+
+plot(forecast(arma_hum, h = 30))
+
+# the below code wont work, because snaive will only work when the frequency is an integer... Manual lookup is the best way... I am not doing it here ... because I am lazy!!
+
+#accuracy(forecast(snaive(traintslist$hum), h = 30), tslist$hum)
+
+#checkresiduals(snaive(traintslist$hum))
+
+accuracy(forecast(ets(traintslist$hum), h = 30), tslist$hum)
+
+checkresiduals(ets(traintslist$hum))
+
+
+
+```
+
+```{r}
+autoplot(trainingxts$temp) + geom_smooth()
+
+arma_temp <-  auto.arima(traintslist$temp)
+checkresiduals(arma_temp)
+
+accuracy(forecast(arma_temp, h = 30), tslist$temp)
+
+plot(forecast(arma_temp, h = 30))
+
+#accuracy(forecast(snaive(traintslist$temp), h = 30), tslist$temp)
+
+#checkresiduals(snaive(traintslist$temp))
+
+accuracy(forecast(ets(traintslist$temp), h = 30), tslist$temp)
+
+checkresiduals(ets(traintslist$temp))
+
+
+```
+
+```{r}
+autoplot(trainingxts$windspeed) + geom_smooth()
+
+arma_windspeed <-  auto.arima(traintslist$windspeed)
+checkresiduals(arma_windspeed)
+
+accuracy(forecast(arma_windspeed, h = 30), tslist$windspeed)
+
+plot(forecast(arma_windspeed, h = 30))
+
+#accuracy(forecast(snaive(traintslist$windspeed), h = 30), tslist$windspeed)
+
+#checkresiduals(snaive(traintslist$windspeed))
+
+accuracy(forecast(ets(traintslist$windspeed), h = 30), tslist$windspeed)
+
+checkresiduals(ets(traintslist$windspeed))
+
+
+```
+
+
+```{r}
+hum_nov <-  forecast(arma_hum, h = 30)
+temp_nov <-  forecast(arma_temp, h = 30)
+windspeed_nov <- forecast(arma_windspeed, h = 30)
+
+nov_w <- data.frame(hum = hum_nov$mean,temp = temp_nov$mean,windspeed = windspeed_nov$mean, mnth = as.factor(rep(11,30)), yr = rep(1,30))
+
+weathersit_nov <-  predict(rpartmdl_W,newdata = nov_w)
+
+```
+
+```{r}
+table(validation$weathersit)
+xreg_val <- data.frame(temp = temp_nov$mean,hum = hum_nov$mean,
+                       workingday = validation$workingday, weekday = validation$weekday,
+                       weathersit = validation$weathersit, 
+                       windspeed = windspeed_nov$mean,
+                       season = validation$season) %>% 
+  dplyr::mutate_if(.,is.factor,as.numeric)
+# as.factor(rep(1,30)
+# RMSE
+sqrt(mean((validation$cnt - predict(rfmdl2$finalModel,newdata = xreg_val))^2))
+
+write.csv(x = (validation$cnt - predict(rfmdl2$finalModel,newdata = xreg_val))^2,file = "rfforecast.csv")
+```
+
+
+```{r,eval = F}
+#"temp", "hum", "mnth","workingday","weekday","weathersit","windspeed"
+Results <- read.csv('Result.csv',stringsAsFactors = F)
+
+Results %>% 
+  dplyr::select(yr,mnth,holiday,weekday,workingday) %>% 
+  mutate_all(as.factor) %>% 
+  mutate(temp = )
+```
+
+```{r}
+xreg3 <- training[,c("temp", "hum","workingday","weekday","weathersit","windspeed","mnth", "yr")] %>% 
+  mutate_if(is.factor, as.numeric) %>% 
+  data.matrix()
+
+rfmdl3 <- train(xreg3,training$cnt,
+                 method = 'rf',
+                 trControl = trainControl(method = 'repeatedcv'),
+                 metric = 'RMSE',
+                 tuneLength = 15,
+                 ntrees = 500,
+                 importance = T
+                 )
+plot(rfmdl3)
+
+plot(varImp(rfmdl3))
+
+checkresiduals(training$cnt - predict(rfmdl3$finalModel))
+```
+
+```{r}
+
+xreg4 <- training[,c("temp", "hum", "mnth","workingday","weekday","windspeed")] %>% 
+  mutate_if(is.factor, as.numeric) %>% 
+  data.matrix()
+
+auto.arima(traintslist$cnt,xreg = xreg4) -> lmarmdl2
+
+checkresiduals(lmarmdl2)
+accuracy(lmarmdl2)
+
+xreg4_encoded <- dummyVars("~.",data = training[,c("temp", "hum", "mnth","workingday","weekday","windspeed")], fullRank = T )
+
+xreg_val %>% 
+  mutate(mnth = rep(11,30)) %>% 
+  dplyr::select(temp,hum,mnth,workingday, weekday,windspeed) -> xreg_val_ARMA
+accuracy(forecast(lmarmdl2, h = 30, xreg = data.matrix(xreg_val_ARMA)),tslist$cnt)
+
+```
+
+```{r}
+retrainxreg <- bike[,c("temp", "hum", "mnth","workingday","weekday","windspeed")] %>% 
+  mutate_if(is.factor, as.numeric) %>% 
+  data.matrix()
+
+auto.arima(tslist$cnt,xreg = retrainxreg) -> lmarmdl_retrain
+
+retrain_hum_arma <- auto.arima(tslist$hum)
+checkresiduals(retrain_hum_arma)
+
+hum_dec <- forecast(retrain_hum_arma,h = 31)
+
+retrain_temp_arma <-  auto.arima(tslist$temp)
+checkresiduals(retrain_temp_arma)
+
+temp_dec <-  forecast(retrain_temp_arma, h = 31)
+
+retrain_windspeed_arma <-  auto.arima(tslist$windspeed)
+checkresiduals(retrain_windspeed_arma)
+
+windspeed_dec <-  forecast(retrain_windspeed_arma, h  =31)
+```
+
+```{r}
+xreg_test <- data.frame(temp = temp_dec$mean,hum = hum_dec$mean,
+                        mnth = rep(12,31),
+                       workingday = Results$workingday, weekday = Results$weekday,
+                       windspeed = windspeed_dec$mean) %>% 
+  dplyr::mutate_if(.,is.factor,as.numeric)
+
+test_fct <- forecast(lmarmdl_retrain,h = 31, xreg = data.matrix(xreg_test))
+
+write.csv(as.matrix(test_fct$mean), file = 'xregarimafcts.csv')
+
+```
+
+
+```{r}
+xreg_test <- data.frame(temp = temp_dec$mean,hum = hum_dec$mean,
+                        mnth.12 = rep(1,31),
+                        mnth.2 = rep(0,31),
+                        mnth.3 = rep(0,31),
+                        mnth.4 = rep(0,31),
+                        mnth.5 = rep(0,31),
+                        mnth.6 = rep(0,31),
+                        mnth.7 = rep(0,31),
+                        mnth.8 = rep(0,31),
+                        mnth.9 = rep(0,31),
+                        mnth.10 = rep(0,31),
+                        mnth.11= rep(0,31),
+                       workingday = as.factor(Results$workingday), weekday = as.factor(Results$weekday),
+                       windspeed = windspeed_dec$mean)
+
+xreg_test_encoded <- predict(dummyVars("~.", data = xreg_test,fullRank = T),xreg_test)
+
+retrainxreg_encoded <- predict(dummyVars("~.",data = bike[,c("temp", "hum", "mnth","workingday","weekday","windspeed")],
+                                 fullRank = T),newdata = bike[,c("temp", "hum", "mnth","workingday","weekday","windspeed")])
+
+auto.arima(tslist$cnt,xreg = retrainxreg_encoded) -> lmarmdl_retrain_encoded
+
+accuracy(lmarmdl_retrain_encoded)
+
+fct_encoded <- forecast(lmarmdl_retrain_encoded, h = 31, xreg = xreg_test_encoded)
+
+#write.csv(fct_encoded$mean,'encodedlm.csv')
+```
+
+
+```{r}
+mdlinteraction <- lm(cnt ~ I(temp^2) + temp + hum + I(hum^2) + windspeed  + yr + mnth + workingday + weekday + mnth * holiday, data = training)
+summary(mdlinteraction)
+
+checkresiduals(mdlinteraction$residuals)
+
+checkresiduals(auto.arima(mdlinteraction$residuals))
+library(nlme)
+glsmdl <- nlme::gls(cnt ~ I(temp^2) + temp + hum + I(hum^2) + windspeed  + yr + mnth + workingday + weekday + mnth * holiday, data = training,correlation = corARMA(p=3,q = 1),control = list(singular.ok = TRUE))
+
+
+
+summary(glsmdl)
+checkresiduals(glsmdl$residuals)
+
+
+xreg_test2 <- data.frame(temp = temp_dec$mean,hum = hum_dec$mean,
+                        mnth = as.factor(rep(12,31)),
+                       workingday = as.factor(Results$workingday), weekday = as.factor(Results$weekday),
+                       windspeed = windspeed_dec$mean,
+                       holiday = as.factor(Results$holiday),
+                       yr = as.factor(rep(1,31)))
+
+write.csv(predict(mdlinteraction,newdata = xreg_test2),"interactionmdl.csv")
+```
+
+```{r}
+testing <- lm(cnt ~ I(temp^2) + temp + I(hum^2) + windspeed + mnth + weekday + lag(cnt), data = training[-1:-365,])
+
+summary(testing)
+
+checkresiduals(testing)
+
+
+```
+
+```{r}
+adf.test(testing$residuals)
+lmtest::dwtest(testing)
+```
+
+## Great but what do we do when we have to predict for month 11 or 12?...lousy idea... let's see what happens
+
+```{r}
+testing2 <- lm(cnt ~ I(temp^2) + temp + I(hum^2) + windspeed + I(as.numeric(mnth)^2) + weekday + lag(cnt), data = training[-1:-365,])
+
+summary(testing2)
+
+checkresiduals(testing2)
+```
+
+## How about using season
+
+```{r}
+testing3 <- lm(cnt ~ I(temp^2) + temp + I(hum^2) + windspeed + season + weekday + dplyr::lag(cnt,1) , data = training[-1:-365,c("temp","hum","windspeed","season","weekday","cnt")])
+
+summary(testing3)
+
+checkresiduals(testing3)
+```
+
+# Dynmaic regression
+
+```{r}
+predictDynamically <- function(model,train,test,dependantvar){
+  ntrain <- nrow(train)
+  ntest <- nrow(test)
+  testtrain <- rbind(train,test)
+  
+  for(i in 1:ntest){
+    #browser()
+    result <- predict(model,newdata=testtrain,subset=1:(ntrain+i-1))
+    testtrain[ntrain+i,"cnt"] <- result$mean[ntrain+i]
+   
+  }
+  # browser()
+  tail(testtrain$cnt,ntest)
+}
+
+# make test cnts
+data.frame(temp = temp_nov$mean,hum = hum_nov$mean,
+                       workingday = validation$workingday, weekday = validation$weekday,
+                       weathersit = validation$weathersit, 
+                       windspeed = windspeed_nov$mean,
+                       season = validation$season)  %>% 
+  dplyr::select(temp,hum,windspeed,season,weekday) %>% 
+  mutate(cnt = rep(NA,30)) -> valdata
+#novcnts <- rep(NA,30)
+dynmodel <- dyn(testing3)
+
+dynreg <- predictDynamically(dynmodel,training[-1:-365,c("temp","hum","windspeed","season","weekday","cnt")],valdata,"cnt")
+
+#write.csv(dynreg,"dynreg.csv")
+
+sqrt(mean((validation$cnt-dynreg)^2))
+
+xts(dynreg, index(validationxts)) -> dynregxts
+write.csv(cbind.xts(validationxts$cnt,dynregxts),"dynreg.csv")
+```
+
+## prediction for December is homework!!!
+
+
+
+```{r}
+retrainxreg_encoded_01 <- predict(dummyVars("~.",data = bike[,c("temp", "hum", "mnth","workingday","weekday","windspeed","holiday")],
+                                 fullRank = T),newdata = bike[,c("temp", "hum", "mnth","workingday","weekday","windspeed","holiday")])
+
+InteractionMatrix <-  retrainxreg_encoded_01[,3:13] * retrainxreg_encoded_01[,22]
+colnames(InteractionMatrix) <- paste0(colnames(retrainxreg_encoded_01)[3:13],'Holiday')
+
+retrainxreg_encoded_01 <- cbind(retrainxreg_encoded_01,InteractionMatrix)
+
+quadterms <- cbind(retrainxreg_encoded_01[,1]^2,retrainxreg_encoded_01[,2]^2)
+
+colnames(quadterms) <- c('temp2','hum2')
+
+
+retrainxreg_encoded_01 <- cbind(retrainxreg_encoded_01,quadterms)
+
+auto.arima(tslist$cnt,xreg = retrainxreg_encoded_01[,c(-1,-2)]) -> lmarmdl_retrain_encoded_quad
+```
+
